@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build / Next
+.next/
+out/
+build/
+dist/
+
+# Env (never commit secrets)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+
+# Debug / IDE
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Vercel
+.vercel
+
+# Supabase local (if you use supabase start later)
+.supabase/
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
