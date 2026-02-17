@@ -33,11 +33,16 @@ Next.js 15 (App Router) + TypeScript directory for bottomless mimosas with hostn
 
    Or with Supabase CLI: `supabase db push` (from project linked to your Supabase project).
 
-4. **Run locally**
+4. **Sample data (optional)**  
+   To get listings on city pages without running the scraper, run the seed in Supabase **SQL Editor**:
+   - Open `supabase/seed.sql`, copy its contents, paste into a new query, run.
+   - This inserts 9 sample spots across Tampa, Orlando, Miami, and St. Petersburg. Safe to run more than once (uses `ON CONFLICT DO NOTHING`).
+
+5. **Run locally**
    ```bash
    npm run dev
    ```
-   Open [http://localhost:3000](http://localhost:3000).
+   Open [http://localhost:3000](http://localhost:3000). After seeding, try [http://fl.localhost:3000/tampa](http://fl.localhost:3000/tampa).
 
 ## Hostname routing (local testing)
 
@@ -69,6 +74,12 @@ Then open:
    ```
 3. Use the printed webhook signing secret as `STRIPE_WEBHOOK_SECRET` in `.env.local`.
 4. Trigger test events (e.g. `checkout.session.completed`) from the Stripe Dashboard or CLI.
+
+## Scraper URLs
+
+Add URLs to scrape in **`app/api/scrape-mimosas/route.ts`**: edit the **`SOURCE_URLS_BY_CITY`** object. Each city (Tampa, Orlando, Miami, St. Petersburg) has an array of URLs; Firecrawl will fetch each URL and the pipeline will extract and score candidates. Use search/list pages for “bottomless mimosas [city]” (e.g. Yelp or TripAdvisor search results). The built-in parser is minimal—you may need to extend `Firecrawl v2 JSON extraction` for a given site’s HTML/markdown structure.
+
+Raw extraction is stored in **`scrape_raw`** (run migration `20260216000007_scrape_raw.sql`). Call **`POST /api/scrape-mimosas/reprocess`** (same `x-cron-secret`) to re-run normalize/score/validate from stored data without calling Firecrawl again.
 
 ## Vercel cron
 

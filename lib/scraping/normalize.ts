@@ -24,14 +24,16 @@ export interface NormalizedCandidate {
   hours?: string;
 }
 
+const ADDRESS_PLACEHOLDER = "Address not listed";
+
 export function normalizeCandidate(
   raw: RawCandidate,
   fallbackCity: string,
   fallbackState: string
 ): NormalizedCandidate | null {
   const name = (raw.name ?? "").trim();
-  const address = (raw.address ?? "").trim();
-  if (!name || !address) return null;
+  if (!name) return null;
+  const address = (raw.address ?? "").trim() || ADDRESS_PLACEHOLDER;
 
   let price: number | undefined;
   if (typeof raw.price === "number" && raw.price >= 15 && raw.price <= 99) {
@@ -53,7 +55,7 @@ export function normalizeCandidate(
     address,
     city: (raw.detected_city ?? fallbackCity).trim() || fallbackCity,
     state: (raw.detected_state ?? fallbackState).trim().toUpperCase().slice(0, 2) || fallbackState,
-    phone: (raw.phone ?? "").trim() || "000-000-0000",
+    phone: (raw.phone ?? "").trim() || "Not listed",
     price,
     evidenceSnippet: raw.evidence_snippet?.slice(0, 50),
     sourceUrl: (raw.source_url ?? "").trim() || "",

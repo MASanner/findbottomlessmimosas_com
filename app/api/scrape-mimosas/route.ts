@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { extractUrl } from "@/lib/scraping/firecrawl";
-import { scoreCandidate } from "@/lib/scraping/score";
-import { normalizeCandidate } from "@/lib/scraping/normalize";
-import { getDedupeKey } from "@/lib/scraping/dedupe";
+import { extractRestaurantsFromUrl } from "@/lib/scraping/firecrawl";
+import { processExtractedRestaurants } from "@/lib/scraping/process";
 
 const APPROVED_CITIES = [
   { city: "Tampa", state: "FL" },
@@ -12,11 +10,29 @@ const APPROVED_CITIES = [
   { city: "St. Petersburg", state: "FL" },
 ] as const;
 
-/** MVP: stub sources - in production these would be Yelp/TripAdvisor/blog SERP URLs */
-const SOURCE_QUERIES: Record<string, string[]> = {
-  yelp: [],
-  tripadvisor: [],
-  blog: [],
+/**
+ * Scrape URLs per city. Format:
+ * - Yelp: find_desc=bottomless+mimosas&find_loc=[City]%2C+FL
+ * - TripAdvisor: Restaurants-g[5-DIGIT-CODE]-zfp10606-[City]_[State].html
+ *   (Get g code: Google "[city] tripadvisor brunch" and use the gXXXXX from the result.)
+ */
+const SOURCE_URLS_BY_CITY: Partial<Record<(typeof APPROVED_CITIES)[number]["city"], string[]>> = {
+  Tampa: [
+    "https://www.yelp.com/search?find_desc=bottomless+mimosas&find_loc=Tampa%2C+FL",
+    "https://www.tripadvisor.com/Restaurants-g34678-zfp10606-Tampa_Florida.html",
+  ],
+  Orlando: [
+    "https://www.yelp.com/search?find_desc=bottomless+mimosas&find_loc=Orlando%2C+FL",
+    "https://www.tripadvisor.com/Restaurants-g34515-zfp10606-Orlando_Florida.html",
+  ],
+  Miami: [
+    "https://www.yelp.com/search?find_desc=bottomless+mimosas&find_loc=Miami%2C+FL",
+    "https://www.tripadvisor.com/Restaurants-g34438-zfp10606-Miami_Florida.html",
+  ],
+  "St. Petersburg": [
+    "https://www.yelp.com/search?find_desc=bottomless+mimosas&find_loc=St.+Petersburg%2C+FL",
+    "https://www.tripadvisor.com/Restaurants-g34607-zfp10606-St_Petersburg_Florida.html",
+  ],
 };
 
 export const maxDuration = 300;
@@ -34,97 +50,57 @@ export async function POST(request: Request) {
 
   const supabase = createAdminClient();
   const stats = { inserted: 0, updated: 0, published: 0, pending: 0 };
+  const debugPerUrl: { url: string; extracted: number; normalized: number; scored: number; validated: number }[] = [];
 
   for (const { city, state } of APPROVED_CITIES) {
-    for (const [source, urls] of Object.entries(SOURCE_QUERIES)) {
-      const toScrape = urls.length ? urls : [];
-      for (const url of toScrape) {
-        try {
-          const result = await extractUrl(apiKey, url);
-          if (!result.success || !result.data?.markdown) continue;
-
-          const rawCandidates = parseCandidatesFromMarkdown(result.data.markdown, url);
-          for (const raw of rawCandidates) {
-            const norm = normalizeCandidate(raw, city, state);
-            if (!norm) continue;
-
-            const scored = scoreCandidate(result.data.markdown, {
-              name: norm.name,
-              address: norm.address,
-              city: norm.city,
-              state: norm.state,
-              phone: norm.phone,
-              price: norm.price,
-              sourceUrl: norm.sourceUrl,
-              hours: norm.hours,
-            });
-
-            if (scored.score === 0) continue;
-
-            const dedupeKey = getDedupeKey(norm.name, norm.address, norm.city, norm.state);
-            const isPublished = scored.score >= 3;
-            const row = {
-              name: scored.name,
-              state: scored.state,
-              city: scored.city,
-              address: scored.address,
-              phone: scored.phone,
-              lat: 0,
-              lon: 0,
-              mimosa_price: norm.price ?? null,
-              confirmation_score: scored.score,
-              source_urls: [scored.sourceUrl],
-              scraped_snippet: scored.evidenceSnippet?.slice(0, 50) ?? null,
-              is_published: isPublished,
-              human_reviewed: false,
-              dedupe_key: dedupeKey,
-              scraped_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            };
-
-            const { data: existing } = await supabase
-              .from("mimosa_spots")
-              .select("id, is_published")
-              .eq("dedupe_key", dedupeKey)
-              .single();
-
-            if (existing) {
-              const { data: cur } = await supabase.from("mimosa_spots").select("source_urls").eq("id", existing.id).single();
-              const urls = Array.isArray(cur?.source_urls) ? [...(cur.source_urls as string[]), scored.sourceUrl] : [scored.sourceUrl];
-              await supabase
-                .from("mimosa_spots")
-                .update({
-                  confirmation_score: row.confirmation_score,
-                  scraped_snippet: row.scraped_snippet,
-                  source_urls: urls,
-                  is_published: row.is_published,
-                  scraped_at: row.scraped_at,
-                  updated_at: row.updated_at,
-                })
-                .eq("id", existing.id);
-              stats.updated++;
-            } else {
-              const defaultLat = state === "FL" ? 27.9506 : 0;
-              const defaultLon = state === "FL" ? -82.4572 : 0;
-              await supabase.from("mimosa_spots").insert({
-                ...row,
-                lat: defaultLat,
-                lon: defaultLon,
-              });
-              stats.inserted++;
-            }
-            if (isPublished) stats.published++;
-            else stats.pending++;
-          }
-        } catch (e) {
-          console.error("Scrape error", url, e);
+    const urls = SOURCE_URLS_BY_CITY[city] ?? [];
+    for (const url of urls) {
+      let extracted = 0;
+      try {
+        const result = await extractRestaurantsFromUrl(apiKey, url);
+        extracted = result.data?.restaurants?.length ?? 0;
+        if (!result.success) {
+          console.warn("[scrape] Firecrawl failed:", url, result.error?.slice(0, 200));
+        } else if (extracted === 0) {
+          console.warn("[scrape] No restaurants extracted from:", url);
         }
-      }
+        if (!result.success || !result.data?.restaurants?.length) {
+          debugPerUrl.push({ url, extracted: 0, normalized: 0, scored: 0, validated: 0 });
+          continue;
+        }
 
+        const restaurants = result.data.restaurants;
+        await supabase.from("scrape_raw").insert({
+          url,
+          city,
+          state,
+          scraped_at: new Date().toISOString(),
+          payload: { restaurants },
+        });
+
+        const processed = await processExtractedRestaurants(restaurants, url, city, state, supabase);
+        stats.inserted += processed.inserted;
+        stats.updated += processed.updated;
+        stats.published += processed.published;
+        stats.pending += processed.pending;
+        debugPerUrl.push({
+          url,
+          extracted: restaurants.length,
+          normalized: processed.normalized,
+          scored: processed.scored,
+          validated: processed.validated,
+        });
+      } catch (e) {
+        console.error("Scrape error", url, e);
+        debugPerUrl.push({ url, extracted: extracted ?? 0, normalized: 0, scored: 0, validated: 0 });
+      }
+    }
+
+    if (urls.length > 0) {
       await supabase.from("scrape_jobs").insert({
         state,
         city,
-        source,
+        source: "firecrawl",
         status: "completed",
         started_at: new Date().toISOString(),
         completed_at: new Date().toISOString(),
@@ -132,34 +108,15 @@ export async function POST(request: Request) {
     }
   }
 
-  return NextResponse.json({
+  const body: { ok: boolean; inserted: number; updated: number; published: number; pending: number; debug?: typeof debugPerUrl } = {
     ok: true,
     inserted: stats.inserted,
     updated: stats.updated,
     published: stats.published,
     pending: stats.pending,
-  });
-}
-
-/** Naive parse: look for list-like patterns in markdown. Replace with real extraction per source. */
-function parseCandidatesFromMarkdown(markdown: string, sourceUrl: string): Array<Record<string, unknown>> {
-  const candidates: Array<Record<string, unknown>> = [];
-  const lines = markdown.split("\n").filter((l) => l.trim());
-  let current: Record<string, unknown> = { source_url: sourceUrl };
-  for (const line of lines) {
-    if (line.startsWith("##") || line.startsWith("#")) {
-      if (current.name || current.address) candidates.push({ ...current });
-      current = { source_url: sourceUrl, name: line.replace(/^#+\s*/, "").trim() };
-    } else if (line.includes("$") && /^\s*\$?\d+/.test(line)) {
-      const match = line.match(/\$?(\d{1,2})/);
-      if (match) current.price = parseInt(match[1], 10);
-    } else if (line.match(/\d{3}[-.]?\d{3}[-.]?\d{4}/)) {
-      current.phone = line.match(/\d{3}[-.]?\d{3}[-.]?\d{4}/)?.[0];
-    } else if (line.length > 10 && line.length < 200 && !line.startsWith("[")) {
-      if (!current.address) current.address = line;
-      else if (!current.detected_city) current.detected_city = line;
-    }
+  };
+  if (stats.inserted === 0 && stats.updated === 0 && debugPerUrl.length > 0) {
+    body.debug = debugPerUrl;
   }
-  if (current.name || current.address) candidates.push(current);
-  return candidates;
+  return NextResponse.json(body);
 }
